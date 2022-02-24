@@ -1,0 +1,758 @@
+---
+title: "Notebook for analyzing SILAC MS evidence file"
+author: "Sammy Keyport, from code by Jared Bard"
+date: "2021/03/23"
+output:
+  html_document:
+    toc: yes
+    toc_depth: 4
+  pdf_document:
+    toc: yes
+    toc_depth: '4'
+---
+# Mass spec data analysis
+
+**Purpose:** Identify heat sensitive proteins in *Saccharomyces kudriavzevii*, and compare those heat sensitive proteins with orthologs in *Saccharomyces cerevisiae*.   
+
+**Experiment:** Grew *S. kudriavzevii* that is *`r knitr::asis_output("\U0394")`lys* and *`r knitr::asis_output("\U0394")`arg* in three different SILAC medias. *S. kudriavzevii* grown at 23`r knitr::asis_output("\U00b0")`C were treated for 8 min at 23`r knitr::asis_output("\U00b0")`C (light medium), 30`r knitr::asis_output("\U00b0")`C (medium medium), or 37`r knitr::asis_output("\U00b0")`C (heavy medium). Then, the three medias were mixed and processed together. Processing steps include cryolysis and ultracentrifugation at 100 k x g. Proteins were extracted and precipitated as protein flake from the supernatant and pellet fractions, and each was submitted for trypsin digestion and subsequent mass spec at MS Bioworks for msb-06 (protein profiling for **10 hours** of instrument time).    
+
+**Analysis:** MaxQuant was used to obtain an evidence file for this experiment. Parameters saved in `Dropbox>sammy>Mass Spec>20210217>mqpar.xml`. Output from analysis saved in `Documents>20210217_ms/`. Below we will process, analyze, and plot the data from this experiment, and compare to mass spectrometry analysis in *S. cerevisiae* from Wallace et al., *Cell* 2015 paper.   
+
+
+```{r setup,warning=FALSE,message=FALSE,echo=FALSE}
+
+## knitr options for report generation
+knitr::opts_chunk$set(warning=FALSE,message=FALSE,cache=FALSE,fig.align = "center",
+                      results="show",
+                      fig.path="figure/",
+                      cache.path="cache/")
+
+
+## data processing options, packages, functions
+options(stringsAsFactors=FALSE)  # load character strings as strings
+library(tidyverse) # more data manipulation
+library(modelr)
+library(ggrepel)
+library(cowplot) # extensions and nice defaults
+library(knitr)
+library(dplyr)
+library(plotly)
+library(cat.extras)
+library(ggcorrplot)
+library(reshape2)
+library(ggpmisc)
+
+graycol <- "#333333cc"
+orangecol <- "#cc5500cc"
+bluecol <- "#0000aacc"
+greencol <- "#22cc00cc"
+purplecol <- "#cc22cccc"
+alph=0.3
+
+
+theme_sk <- function(base_size=20) {
+  theme_grey(base_size=base_size, base_family = "") %+replace% 
+    theme(panel.grid=element_blank(),
+          axis.text = element_text(size = 20),
+          strip.text.x = element_text(size = 12, vjust = 2, margin = margin(t = 10)),
+          strip.text.y = element_text(size = 12, vjust = 2, margin = margin(r = 10)),
+          #strip.text = element_text(size = 15, vjust = 2),
+          panel.background=element_blank(),
+          axis.ticks=element_line(colour="grey20"),
+          panel.border=element_rect(fill=NA),
+          legend.background = element_blank(),
+          #legend.key.height = unit(3, "mm"),
+          legend.key = element_blank(),
+          strip.background = element_blank(),
+          legend.box.spacing = unit(1, "mm"), 
+          plot.title = element_text(hjust = 0.5)) 
+}
+
+```
+
+```{r load-utilities, echo=FALSE}
+#useful functions (thanks Edward, Allan and Cat!!)
+source("src/utilityFunctions.R")
+`%!in%` = Negate(`%in%`)
+
+#function to load evidence file.
+#for peptides that are listed with multiple proteins: split the peptide up into separate entries for each peptide/protein pair
+readEvidence <- function(file = NULL) {
+  temp_evidence <- read_tsv(file) %>% 
+    rename(Light = 'Intensity L', Medium = 'Intensity M', Heavy = 'Intensity H',
+           Ratio_ML = 'Ratio M/L', Ratio_HL = 'Ratio H/L', Ratio_HM = 'Ratio H/M') %>%
+    separate(Proteins,paste("Protein_",0:9),sep=";") %>% 
+    gather(key = "Protein_num",value = "ORF",paste("Protein_",0:9)) %>%
+    select(-Protein_num) %>% 
+    filter(ORF != 'NA')
+#add an "Experiment" column if the data doesn't already have one  
+if ('Experiment' %!in% names(temp_evidence)) {
+  temp_evidence$Experiment = 'NA'
+}
+#Group peptides together into protein bins and calculate the mean SILAC ratio of each peptide
+#Also filters for p values <-0.05 and selects peptides with a ratio listed for each silac pair
+#add in labels to the table
+  temp_proteins <- temp_evidence %>% 
+    filter(PEP < 0.05, Ratio_ML > 0, Ratio_HL > 0, Ratio_HM > 0) %>% 
+    group_by(Experiment,ORF) %>%
+    summarise(Ratio_ML_mean = mean(Ratio_ML), Ratio_HL_mean = mean(Ratio_HL), 
+              Ratio_HM_mean = mean(Ratio_HM), L_total = sum(Light), M_total = sum(Medium), 
+              H_total = sum(Heavy),n_peptides = n()) %>%
+    ungroup()
+  return(temp_proteins)
+}
+```
+
+## Load data
+
+I wanted to match the *S. kudriavzevii* genes to their *S. cerevisiae* orthologs according to YGOB designations. To do this, I created a fasta file to input into the **MaxQuant workflow** that contained *S. kudriavzevii* gene names plus the corresponding *S. cerevisae* orthologous ORF within the fasta header for each protein sequence. To generate this convenient fasta header, I obtained YGOB proteomes from [YGOB](http://ygob.ucd.ie/) under `Protein & Nucleotide Sequences > AA.fsa`. I filtered this file to *S. kudriavzevii* proteins only using `get_sets_from_AA_YGOB.Rmd` in `analysis/` and `AA.fsa` in `src/` folder. In addition to obtaining 6,144 *S. kudriavzevii* genes, this script also creates the convenient header containing *S. kudriavzevii* and *S. cerevisaie* gene name information.  
+
+Here we are loading two datasets: psup data from Wallace et al., *Cell* 2015 paper (for comparison), and my *S. kudriavzevii* data.  
+
+```{r read-files, dependson="setup"}
+psup <- read_tsv("src/scer_aggregation_psup_long.txt",comment = "#") %>% rename(ORF = orf)
+skud_evi <- readEvidence("src/evidence/evidence.txt")
+```
+
+
+## Filter data
+
+I want to filter two sets of variables: Ratio of Medium to Light **(ML)** and Ratio of Heavy to Light **(HL)** by having more than one peptide peptide (or at least 1 for unfiltered data). I also want to remove contaminants.  
+
+I also am filtering the psup data from Wallace et al., *Cell* 2015 paper to compare most directly my *S. kudriavzevii* data.  
+
+
+```{r filter-data}
+# filter proteins with > 1 peptides (reduces noise)
+data_filt <- skud_evi %>% filter(n_peptides>1, !grepl("CON_*",ORF)) %>%
+  separate(col = ORF, into = c("species", "region", "ORF", "real"), sep = "_") %>%
+  select(-species, -region)
+
+data_unfilt <- skud_evi %>% filter(!grepl("CON_*",ORF)) %>%
+  separate(col = ORF, into = c("species", "region", "ORF", "real"), sep = "_", remove = FALSE) %>%
+  select(-species, -region)
+
+# In my data, untreated cells (L) were mixed with heat shocked cells (M and H). Thus the ratio of M/L or H/L should correspond to the ratio of psup_42C/psup_30C or psup_46C/psup_30C, respectively. 
+
+psup_ratio <- psup %>% filter(experiment %in% c("30C.rep1","37C.8min", "42C.8min", "46C.8min")) %>%
+  select(ORF,gene,experiment,psup) %>%
+  pivot_wider(names_from=experiment,values_from=psup) %>%
+  mutate(psup_37C.8minover30C=`37C.8min`/`30C.rep1`, 
+         psup_42C.8minover30C=`42C.8min`/`30C.rep1`, 
+         psup_46C.8minover30C=`46C.8min`/`30C.rep1`)
+
+```
+
+
+With ortholog designations for proteins detected in *S. kudriavzevii* experiment, I can combine my *S. kudriavzevii* mass spec data with the aggregator/superaggregator designation from Wallace et al., *Cell* 2015 paper. I am joining these *S. cerevisiae* data to my ML and HL dataframes. 
+
+```{r add aggregation data to skud data}
+drummond_heat_agg <- read_tsv("src/drummond_heat_aggregators.txt",
+                              comment = "#",col_types="ccc") %>%
+  select(orf,superaggregator) %>%
+  rename(ORF = orf) %>%
+  mutate(agg = replace(superaggregator,superaggregator == "TRUE","superaggregator")) %>% 
+  mutate(agg = replace(agg,agg == "FALSE","aggregator")) %>% select(-superaggregator)
+
+y_filt <- data_filt %>%
+  left_join(psup_ratio %>% select(ORF,gene, psup_42C.8minover30C, psup_37C.8minover30C, psup_46C.8minover30C) ,by=c("ORF")) %>%
+  left_join(drummond_heat_agg,by="ORF")
+
+y_unfilt <- data_unfilt %>%
+  left_join(psup_ratio %>% select(ORF,gene, psup_42C.8minover30C, psup_37C.8minover30C, psup_46C.8minover30C),by=c("ORF")) %>%
+  left_join(drummond_heat_agg,by="ORF")
+
+```
+
+
+## Analyses
+### Supernatant/pellet correlation
+#### Filtered data
+
+I expect that for each protein detected, as the ratio in the pellet **increases**, the ratio in the supernatant within that temperature comparison **decreases**. Here I will wrangle the data into a useful format and plot ratio in supernatant vs. pellet for each (for those proteins detected in both fractions). Note this does not provide any information on those proteins detected in one fraction but not the other (e.g., detected in supernatant but not the pellet).   
+
+
+I will calculate Spearman's `r knitr::asis_output("\U03c1")` pairwise correlation coeffeicient. I expect `r knitr::asis_output("\U03c1")` to be negative in each case, but more negative when comparing 37/23°C (HL) ratios due to the more severe heat shock.   
+
+
+```{r calculate-spearmans-rho-filtered}
+#medium
+y_filt_med <- distinct(y_filt) %>%
+  select(Experiment, ORF, gene, Ratio_ML_mean, real)%>%
+  pivot_wider(names_from = Experiment, 
+              values_from = Ratio_ML_mean, values_fill = NA) %>%
+  unnest(cols = c(pellet, supernatant)) %>%
+  filter(is.na(supernatant) == FALSE, is.na(pellet) == FALSE)
+cor.med <- cor(y_filt_med$supernatant, y_filt_med$pellet, method='s', use='pairwise.complete.obs')
+#heavy
+y_filt_heavy <- distinct(y_filt) %>%
+  select(Experiment, ORF, gene, Ratio_HL_mean, real) %>%
+  pivot_wider(names_from = Experiment, 
+              values_from = Ratio_HL_mean, values_fill = NA) %>%
+  unnest(cols = c(pellet, supernatant)) %>%
+  filter(is.na(supernatant) == FALSE, is.na(pellet) == FALSE)
+cor.heavy <- cor(y_filt_heavy$pellet, y_filt_heavy$supernatant, method='s', use = "pairwise.complete.obs")
+
+```
+
+Now plotting the data in **both** fractions of the filtered data (824 -> 195, ~24%)...  
+
+
+```{r fig.show="hold", out.width="50%", fig.align="default"}
+ggplot(y_filt_med, aes(x=supernatant, y=pellet)) + 
+  geom_point(alpha=alph, shape=16) +
+  labs(x = "Supernatant", 
+       y = "Pellet", 
+       title = "30/23°C ratio correlation:\nfiltered data") + 
+  theme_sk() + 
+  annotate(geom = "text", x = 1.3, y = 2.5, label = paste("\u03c1 = ", format(cor.med, digits = 3)), size = 5) +
+  annotate(geom = "text", x = 1.3, y = 2.3, label = paste("n = ", dim(y_filt_med)[1]), size = 5)
+
+
+ggplot(y_filt_heavy, aes(x=supernatant, y=pellet)) + 
+  geom_point(alpha=alph, shape=16) +
+  labs(x = "Supernatant", 
+       y = "Pellet", 
+       title = "37/23°C ratio correlation:\nfiltered data") + 
+  theme_sk() + 
+  annotate(geom = "text", x = 1.4, y = 5.4, label = paste("\u03c1 = ", format(cor.heavy, digits = 3)), size = 5) +
+  annotate(geom = "text", x = 1.4, y = 5, label = paste("n = ", dim(y_filt_heavy)[1]), size = 5)
+
+```
+Note different x axis range.  
+
+I am down to 195 proteins detected in **both** fractions. This leads to a positve rho in both cases, which is not what I expected. However, the ML temperature comparison (30/23°C) is the less intense temperature difference, and in HL (37/23°C) we can see the rho is closer to zero. Let's look using unfiltered data (more proteins in both fractions).  
+
+#### Unfiltered data
+
+```{r calculate-spearmans-rho-unfiltered}
+#heavy, unfiltered
+y_unfilt_heavy <- y_unfilt %>%
+  select(Experiment, ORF, gene, Ratio_HL_mean, real) %>%
+  pivot_wider(names_from = Experiment, 
+              values_from = Ratio_HL_mean, values_fill = NA) %>%
+  pivot_longer(c(pellet, supernatant)) %>%
+  mutate(value = lapply(value, `length<-`, max(lengths(value)))) %>% 
+  pivot_wider(names_from = name, values_from = c(value)) %>% 
+  unchop(cols = c(pellet, supernatant)) %>%
+  filter(is.na(supernatant) == FALSE, is.na(pellet) == FALSE)
+
+cor.un.heavy <- cor(y_unfilt_heavy$supernatant, y_unfilt_heavy$pellet, method='s', use='pairwise.complete.obs')
+
+#medium, unfiltered
+y_unfilt_med <- y_unfilt %>%
+  select(Experiment, ORF, gene, Ratio_ML_mean, real) %>%
+  pivot_wider(names_from = Experiment, 
+              values_from = Ratio_ML_mean, values_fill = NA) %>%
+  pivot_longer(c(pellet, supernatant)) %>%
+  mutate(value = lapply(value, `length<-`, max(lengths(value)))) %>% 
+  pivot_wider(names_from = name, values_from = c(value)) %>% 
+  unchop(cols = c(pellet, supernatant)) %>%
+  filter(is.na(supernatant) == FALSE, is.na(pellet) == FALSE)
+
+cor.un.med <- cor(y_unfilt_med$supernatant, y_unfilt_med$pellet, method='s', use='pairwise.complete.obs')
+
+```
+
+Now plotting proteins detected in **both** fractions for unfiltered data (1238 -> 321, ~26%)....  
+
+
+```{r fig.show="hold", out.width="50%", fig.align="default"}
+ggplot(y_unfilt_med, aes(x=supernatant, y=pellet)) +
+  geom_point(alpha=alph, shape=16) +
+  labs(x = "Supernatant",
+       y = "Pellet",
+       title = "30/23°C ratio correlation:\nunfiltered data") +
+  theme_sk() +
+  annotate(geom = "text", x = 1.5, y = 4.3, 
+           label = paste("\u03c1 = ", format(cor.un.med, digits = 3)), size = 5) +
+  annotate(geom = "text", x = 1.5, y = 4.0, 
+           label = paste("n = ", dim(y_unfilt_med)[1]), size = 5)
+
+ggplot(y_unfilt_heavy, aes(x=supernatant, y=pellet)) +
+  geom_point(alpha=alph, shape=16) +
+  labs(x = "Supernatant",
+       y = "Pellet",
+       title = "37/23°C ratio correlation:\nunfiltered data") +
+  theme_sk() +
+  annotate(geom = "text", x = 1.7, y = 11, 
+           label = paste("\u03c1 = ", format(cor.un.heavy, digits = 3)), size = 5) +
+  annotate(geom = "text", x = 1.7, y = 10.3, 
+           label = paste("n = ", dim(y_unfilt_heavy)[1]), size = 5)
+```
+Note different x axis range.  
+
+Now we are looking at 321 proteins in each fraction, however the rho is still relatively high for ML. But look! A negative rho for HL.... But everything still looks like a big blob pretty much. Hmm...   
+
+
+
+### Detection vs. abundance
+#### Filtered data
+
+How deep is our coverage after 5 hours of protein profiling in each sample? I will use data from Csardi et al., 2015 paper for protein abundance.  
+<blockquote> Citation: "Accounting for experimental noise reveals that transcript levels, amplified by post-transcriptional regulation, largely determine steady-state protein levels in yeast," Gábor Csárdi, Alexander Franks, David S. Choi, Eduardo M. Airoldi, and D. Allan Drummond, PLoS Genetics, 2015  </blockquote>  
+
+```{r read-abundance-data}
+abundance <- read_tsv("src/scer-mrna-protein-absolute-estimate.txt", 
+                col_names = TRUE, 
+                skip = 16) %>%
+  select(orf, gene, prot) %>%
+  rename(ORF = orf)
+```
+
+Here I am just joining the filtered data to abundance data, and getting counts for each fraction. 
+
+```{r join-abundance-and-mass-spec-filtered}
+med.ab <- left_join(abundance, y_filt, by = c("gene", "ORF")) %>%
+  select(ORF, gene, prot, Experiment) %>%
+  distinct()
+
+counts <- dplyr::count(med.ab, vars = gene) %>%
+  mutate(n = as.numeric(n)) %>%
+  rename(gene = vars)
+
+med.ab.new <- med.ab %>%
+  left_join(., counts, by = "gene") %>%
+  mutate(Experiment = case_when(n == 2 ~ "both", 
+                                n == 1 ~ Experiment))
+```
+
+Below I'm plotting protein abundance (x-axis) and number of proteins in each abundance bin (y axis), and coloring by which fraction those proteins were detected in (supernatant, pellet, or both).  
+
+```{r plot-filtered-proteins-detected-by-abundance}
+ggplot(data = med.ab.new, aes(x = prot, color = Experiment, fill = Experiment)) +
+  geom_histogram(bins = 30) +
+  labs(x = "Protein abundance (molecules/cell)", 
+       y = "count", 
+       title = "Proteins detected by abundance\n(filtered)") +
+  scale_colour_manual(name = "detected?", 
+                      labels = c(`pellet` = "pellet only",
+                                 `supernatant` = "supernatant only", 
+                                 `both` = "in both"),
+                    values = c(graycol, graycol, graycol), 
+                    na.value = graycol) +
+  scale_fill_manual(name = "detected?", 
+                    labels = c(`pellet` = "pellet only",
+                               `supernatant` = "supernatant only", 
+                               `both` = "in both"),
+                    values = c(bluecol, greencol, purplecol), 
+                    na.value = "lightgray") +
+  scale_x_log10nice() +
+  theme_sk() #+
+  #geom_vline(xintercept = 9421, colour = orangecol, size = 1) +
+  #annotate(geom = "text", x = 60000, y = 625, label = "Nug1\nabundance", color = orangecol)
+
+```
+
+Here you can see abdunant proteins are very biased to be detected, as expected. Haneul told me this plot was confusing and I should make a binary label, detected or not detected, for each fraction, and plot it that way. 
+
+##### Binary: detected or not
+
+```{r wrangle-and-plot-haneul-figure-filtered, fig.height = 4, fig.width = 7.5}
+quad <- med.ab.new %>%
+  mutate(sup = case_when((Experiment != "pellet" & is.na(Experiment) == FALSE) ~ "detected", 
+                         (Experiment == "pellet" | is.na(Experiment) == TRUE) ~ "not\ndetected"), 
+         pel = case_when((Experiment != "supernatant" & is.na(Experiment) == FALSE) ~ "detected", 
+                         (Experiment == "supernatant" | is.na(Experiment) == TRUE) ~ "not\ndetected"))
+
+ggplot(quad, aes(x = sup, y = pel, color = log(prot))) +
+  geom_jitter(alpha = 0.9) +
+  labs(x = "Supernatant", 
+       y = "Pellet", 
+       color = "Log10 protein\nabundance", 
+       title = "filtered") +
+  theme_sk() +
+  scale_x_discrete(limits = c("not\ndetected", "detected")) +
+  scale_y_discrete(limits = c("not\ndetected", "detected")) +
+  scale_color_gradient(low = "yellow", high = "darkblue")
+```
+
+Haneul and I both agreed this plot is not very informative. However, one useful piece of information that you can see from this chart is that proteins of higher abundance tend to be detected in both fractions, but interestingly for proteins detected only in the pellet we observe more proteins of lower abundance detected relative to those only detected in the supernatant. Let's explore this observation using density plots.  
+
+##### Density abundance plots
+
+Looking at the abundance of all proteins, which were we able to detect?  
+
+```{r wrangle-detected-or-not-filtered}
+detect_med <- med.ab.new %>%
+  mutate(detected = case_when(is.na(Experiment) == TRUE ~ "not detected", 
+                              is.na(Experiment) == FALSE ~ "detected"))
+```
+
+```{r plot-four-density-abundance-unfiltered, fig.show="hold", out.width="50%", fig.align="default", echo = FALSE}
+# detected or not?
+ggplot() +
+  geom_density(data = detect_med, aes(x = prot, y = ..count.., colour = "all", fill = "all"), size = 1.2, alpha = 0.05) +
+  geom_density(data = detect_med, aes(x = prot, y = ..count.., colour = detected, fill = detected), size = 1.2, alpha = 0.2) +
+  scale_x_log10nice() +
+  labs(x = "Protein abundance (molecules/cell)",
+      title = "Proteins detected vs. undetected\n(filtered)") +
+  scale_fill_manual(guide = "legend", name = "detected?",
+                    values = c(orangecol, greencol, graycol)) +
+  scale_colour_manual(name = "detected?", 
+                    values = c(orangecol, greencol, graycol)) +
+  theme_sk() #+
+  #geom_vline(xintercept = 9421, colour = "maroon", size = 1) +
+  #annotate(geom = "text", x = 60000, y = 2005, label = "Nug1\nabundance", color = "maroon") 
+
+#change NA to not detected
+med.ab.new$Experiment[is.na(med.ab.new$Experiment)] <- "not detected"
+
+#which fraction(s)?
+ggplot(med.ab.new, aes(x = prot, color = Experiment, fill = Experiment)) +
+  geom_density(aes(y = ..count..), size = 1.2, alpha = 0.2) +
+  scale_x_log10nice() +
+    labs(x = "Protein abundance (molecules/cell)",
+       title = "Detected proteins breakdown\n(filtered)") +
+  scale_fill_manual(name = "detected?", labels = c(`pellet` = "pellet only",
+                                                      `supernatant` = "supernatant only", 
+                                                     `both` = "in both"),
+                    values = c(greencol, graycol, purplecol, bluecol)) +
+  scale_colour_manual(name = "detected?", labels = c(`pellet` = "pellet only",
+                                                      `supernatant` = "supernatant only", 
+                                                     `both` = "in both"),
+                    values = c(greencol, graycol, purplecol, bluecol)) +
+  theme_sk() #+
+  #geom_vline(xintercept = 9421, colour = "maroon", size = 1) +
+  #annotate(geom = "text", x = 60000, y = 2005, label = "Nug1\nabundance", color = "maroon") 
+
+# which fraction(s), relative to all?
+ggplot() +
+  geom_density(data = med.ab.new, aes(x = prot, y = ..count.., colour = "all", fill = "all"), size = 1.2, alpha = 0.05) +
+  geom_density(data = med.ab.new, aes(x = prot, y = ..count.., colour = Experiment, fill = Experiment), size = 1.2, alpha = 0.2) +
+  scale_x_log10nice() +
+  labs(x = "Protein abundance (molecules/cell)",
+      title = "Detected proteins breakdown - all\n(filtered)") +
+  scale_fill_manual(guide = "legend", name = "detected?", labels = c(`pellet` = "pellet only",
+                                                      `supernatant` = "supernatant only",
+                                                     `both` = "in both",
+                                                     `all` = "all"),
+                    values = c(orangecol, greencol, graycol, purplecol, bluecol)) +
+  scale_colour_manual(name = "detected?", labels = c(`pellet` = "pellet only",
+                                                      `supernatant` = "supernatant only",
+                                                     `both` = "in both", 
+                                                     `all` = "all"),
+                    values = c(orangecol, greencol, graycol, purplecol, bluecol)) +
+  theme_sk() #+
+  #geom_vline(xintercept = 9421, colour = "maroon", size = 1) +
+  #annotate(geom = "text", x = 60000, y = 2005, label = "Nug1\nabundance", color = "maroon")
+
+# Which fraction(s), relative to all, zoom?
+ggplot() +
+  geom_density(data = med.ab.new, aes(x = prot, y = ..count.., colour = "all", fill = "all"), size = 1.2, alpha = 0.05) +
+  geom_density(data = med.ab.new, aes(x = prot, y = ..count.., colour = Experiment, fill = Experiment), size = 1.2, alpha = 0.2) +
+  scale_x_log10nice() +
+  labs(x = "Protein abundance (molecules/cell)",
+      title = "Zoom\n(filtered)") +
+  scale_fill_manual(guide = "legend", name = "detected?", labels = c(`pellet` = "pellet only",
+                                                      `supernatant` = "supernatant only",
+                                                     `both` = "in both",
+                                                     `all` = "all"),
+                    values = c(orangecol, greencol, graycol, purplecol, bluecol)) +
+  scale_colour_manual(name = "detected?", labels = c(`pellet` = "pellet only",
+                                                      `supernatant` = "supernatant only",
+                                                     `both` = "in both", 
+                                                     `all` = "all"),
+                    values = c(orangecol, greencol, graycol, purplecol, bluecol)) +
+  theme_sk() +
+  coord_cartesian(ylim = c(0,250)) #+
+  #geom_vline(xintercept = 9421, colour = "darkred", size = 1) 
+```
+
+
+#### Unfiltered data
+
+Same as above, now with unfiltered data.
+
+```{r join-abundance-and-mass-spec-unfiltered}
+unfilt.ab <- left_join(abundance, y_unfilt, by = c("gene", "ORF")) %>%
+  select(ORF, gene, prot, Experiment) %>%
+  distinct()
+
+unfilt_counts <- dplyr::count(unfilt.ab, vars = gene) %>%
+  mutate(n = as.numeric(n)) %>%
+  rename(gene = vars)
+
+unfilt.ab.new <- unfilt.ab %>%
+  left_join(., unfilt_counts, by = "gene") %>%
+  mutate(Experiment = case_when(n == 2 ~ "both", 
+                                n == 1 ~ Experiment))
+```
+
+```{r plot-unfiltered-proteins-detected-by-abundance}
+ggplot(data = unfilt.ab.new, aes(x = prot, color = Experiment, fill = Experiment)) +
+  geom_histogram(bins = 30) +
+  labs(x = "Protein abundance (molecules/cell)", 
+       y = "count", 
+       title = "Proteins detected by abundance\n(unfiltered)") +
+  scale_colour_manual(name = "detected?", labels = c(`pellet` = "pellet only",
+                                                      `supernatant` = "supernatant only", 
+                                                     `both` = "in both"),
+                    values = c(graycol, graycol, graycol), na.value = graycol) +
+  scale_fill_manual(name = "detected?", labels = c(`pellet` = "pellet only",
+                                                   `supernatant` = "supernatant only", 
+                                                   `both` = "in both"),
+                    values = c(bluecol, greencol, purplecol), na.value = "lightgray") +
+  scale_x_log10nice() +
+  theme_sk() #+
+  #geom_vline(xintercept = 9421, colour = orangecol, size = 1) +
+  #annotate(geom = "text", x = 60000, y = 625, label = "Nug1\nabundance", color = orangecol)
+```
+
+##### Binary: detected or not
+
+```{r, wrangle-and-plot-haneul-figure-unfiltered, fig.height = 4, fig.width = 7.5}
+quad_unfilt <- unfilt.ab.new %>%
+  mutate(sup = case_when((Experiment != "pellet" & is.na(Experiment) == FALSE) ~ "detected", 
+                         (Experiment == "pellet" | is.na(Experiment) == TRUE) ~ "not\ndetected"), 
+         pel = case_when((Experiment != "supernatant" & is.na(Experiment) == FALSE) ~ "detected", 
+                         (Experiment == "supernatant" | is.na(Experiment) == TRUE) ~ "not\ndetected"))
+
+ggplot(quad_unfilt, aes(x = sup, y = pel, color = log(prot))) +
+  geom_jitter(alpha = 0.9) +
+  labs(x = "Supernatant", 
+       y = "Pellet", 
+       color = "Log10 protein\nabundance", 
+       title = "unfiltered") +
+  theme_sk() +
+  scale_x_discrete(limits = c("not\ndetected", "detected")) +
+  scale_y_discrete(limits = c("not\ndetected", "detected")) +
+  scale_color_gradient(low = "yellow", high = "darkblue")
+```
+
+##### Density abundance plots
+
+
+```{r wrangle-detected-or-not-unfiltered}
+detect_unfilt <- unfilt.ab.new %>%
+  mutate(detected = case_when(is.na(Experiment) == TRUE ~ "not detected", 
+                              is.na(Experiment) == FALSE ~ "detected"))
+```
+
+
+```{r plot-four-density-abundance-filtered, fig.show="hold", out.width="50%", fig.align="default", echo = FALSE}
+# detected or not?
+ggplot() +
+  geom_density(data = detect_unfilt, aes(x = prot, y = ..count.., colour = "all", fill = "all"), size = 1.2, alpha = 0.05) +
+  geom_density(data = detect_unfilt, aes(x = prot, y = ..count.., colour = detected, fill = detected), size = 1.2, alpha = 0.2) +
+  scale_x_log10nice() +
+  labs(x = "Protein abundance (molecules/cell)",
+      title = "Proteins detected vs undetected\n(unfiltered)") +
+  scale_fill_manual(guide = "legend", name = "detected?",
+                    values = c(orangecol, greencol, graycol)) +
+  scale_colour_manual(name = "detected?", 
+                    values = c(orangecol, greencol, graycol)) +
+  theme_sk() #+
+  #geom_vline(xintercept = 9421, colour = "maroon", size = 1) +
+  #annotate(geom = "text", x = 60000, y = 2005, label = "Nug1\nabundance", color = "maroon") 
+
+# change NAs to not detected
+unfilt.ab.new$Experiment[is.na(unfilt.ab.new$Experiment)] <- "not detected"
+
+# which fraction(s)?
+ggplot(unfilt.ab.new, aes(x = prot, color = Experiment, fill = Experiment)) +
+  geom_density(aes(y = ..count..), size = 1.2, alpha = 0.2) +
+  scale_x_log10nice() +
+    labs(x = "Protein abundance (molecules/cell)",
+       title = "Detected proteins breakdown\n(unfiltered)") +
+  scale_fill_manual(name = "detected?", labels = c(`pellet` = "pellet only",
+                                                      `supernatant` = "supernatant only", 
+                                                     `both` = "in both"),
+                    values = c(greencol, graycol, purplecol, bluecol)) +
+  scale_colour_manual(name = "detected?", labels = c(`pellet` = "pellet only",
+                                                      `supernatant` = "supernatant only", 
+                                                     `both` = "in both"),
+                    values = c(greencol, graycol, purplecol, bluecol)) +
+  theme_sk() #+
+  #geom_vline(xintercept = 9421, colour = "maroon", size = 1) +
+  #annotate(geom = "text", x = 60000, y = 2005, label = "Nug1\nabundance", color = "maroon") 
+
+# which fractions, relative to all? 
+ggplot() +
+  geom_density(data = unfilt.ab.new, aes(x = prot, y = ..count.., colour = "all", fill = "all"), size = 1.2, alpha = 0.05) +
+  geom_density(data = unfilt.ab.new, aes(x = prot, y = ..count.., colour = Experiment, fill = Experiment), size = 1.2, alpha = 0.2) +
+  scale_x_log10nice() +
+  labs(x = "Protein abundance (molecules/cell)",
+      title = "Detected proteins breakdown - all\n(unfiltered)") +
+  scale_fill_manual(guide = "legend", name = "detected?", labels = c(`pellet` = "pellet only",
+                                                      `supernatant` = "supernatant only",
+                                                     `both` = "in both",
+                                                     `all` = "all"),
+                    values = c(orangecol, greencol, graycol, purplecol, bluecol)) +
+  scale_colour_manual(name = "detected?", labels = c(`pellet` = "pellet only",
+                                                      `supernatant` = "supernatant only",
+                                                     `both` = "in both", 
+                                                     `all` = "all"),
+                    values = c(orangecol, greencol, graycol, purplecol, bluecol)) +
+  theme_sk() #+
+  #geom_vline(xintercept = 9421, colour = "maroon", size = 1) +
+  #annotate(geom = "text", x = 60000, y = 2005, label = "Nug1\nabundance", color = "maroon") 
+
+# which fractions, relative to all, zoom? 
+ggplot() +
+  geom_density(data = unfilt.ab.new, aes(x = prot, y = ..count.., colour = "all", fill = "all"), size = 1.2, alpha = 0.05) +
+  geom_density(data = unfilt.ab.new, aes(x = prot, y = ..count.., colour = Experiment, fill = Experiment), size = 1.2, alpha = 0.2) +
+  scale_x_log10nice() +
+  labs(x = "Protein abundance (molecules/cell)",
+      title = "Zoom\n(unfiltered)") +
+  scale_fill_manual(guide = "legend", name = "detected?", labels = c(`pellet` = "pellet only",
+                                                      `supernatant` = "supernatant only",
+                                                     `both` = "in both",
+                                                     `all` = "all"),
+                    values = c(orangecol, greencol, graycol, purplecol, bluecol)) +
+  scale_colour_manual(name = "detected?", labels = c(`pellet` = "pellet only",
+                                                      `supernatant` = "supernatant only",
+                                                     `both` = "in both", 
+                                                     `all` = "all"),
+                    values = c(orangecol, greencol, graycol, purplecol, bluecol)) +
+  theme_sk() +
+  #geom_vline(xintercept = 9421, colour = "maroon", size = 1) +
+  #annotate(geom = "text", x = 60000, y = 2005, label = "Nug1\nabundance", color = "maroon") +
+  coord_cartesian(ylim = c(0,400)) 
+
+```
+
+
+### Comparison to S. cerevisiae
+#### Filtered data
+
+I want to compare this *S. kudriavzevii* dataset to the Wallace dataset. 
+
+```{r plotly-medium-pellet-unfiltered, fig.align="center"}
+med <- ggplot(y_filt%>%filter(Experiment=="pellet"),
+       aes(x=1/Ratio_ML_mean,y=psup_42C.8minover30C,color=agg, label = gene))+
+  geom_vline(xintercept = 1, colour = "lightgrey") +
+  geom_hline(yintercept = 1, colour = "lightgrey") +
+  geom_point()+
+  coord_cartesian(xlim=c(0,1.5),ylim=c(0,1.5)) +
+  labs(x = "Skud 30/23°C (M/L) Ratio", 
+       y = "Wallace psup ratio 42/30°C", 
+       color = "", 
+       title = "Medium/Light, filtered") +
+  theme_sk() +
+  theme(legend.position = c(0,0))
+  
+fig.med <- ggplotly(med, tooltip = c("label")) %>% layout(legend = list(x = 100, y = 0.5))
+fig.med
+```
+
+```{r plotly-heavy-pellet-filtered, fig.align="center"}
+heavy <- ggplot((y_filt%>% filter(Experiment == "pellet")),
+       aes(x=1/Ratio_HL_mean,y=psup_42C.8minover30C,color=agg, label = gene))+
+  geom_vline(xintercept = 1, colour = "grey") +
+  geom_hline(yintercept = 1, colour = "grey") +
+  geom_point()+
+  coord_cartesian(xlim=c(0,2),ylim=c(0,1.5)) +
+  labs(x = "Skud 37/23°C (H/L) Ratio", 
+       y = "Wallace psup ratio 42/30°C", 
+       color = "", 
+       title = "Heavy/Light, filtered") +
+  theme_sk() +
+  theme(legend.position = c(0,0)) 
+
+
+fig.heavy <- ggplotly(heavy, tooltip = c("label"))
+fig.heavy
+```
+
+#### Unfiltered data
+
+```{r ploty medium pellet unfiltered, fig.align="center"}
+unfilt_med <- ggplot(y_unfilt%>%filter(Experiment=="pellet"),
+       aes(x=1/Ratio_ML_mean,y=psup_42C.8minover30C,color=agg, label = gene))+
+  geom_vline(xintercept = 1, colour = "lightgrey") +
+  geom_hline(yintercept = 1, colour = "lightgrey") +
+  geom_point()+
+  coord_cartesian(xlim=c(0,1.5),ylim=c(0,1.5)) +
+  labs(x = "Skud 30/23°C (M/L) Ratio", 
+       y = "Wallace psup ratio 42/30°C", 
+       color = "", 
+       title = "Medium/Light, unfiltered") +
+  theme_sk() +
+  theme(legend.position = c(0,0))
+  
+fig.med.un <- ggplotly(unfilt_med, tooltip = c("label")) %>% layout(legend = list(x = 100, y = 0.5))
+fig.med.un
+```
+
+```{r plotly-heavy-pellet-unfiltered, fig.align="center"}
+unfilt_heavy <- ggplot((y_unfilt%>% filter(Experiment == "pellet")),
+       aes(x=1/Ratio_HL_mean,y=psup_42C.8minover30C,color=agg, label = gene))+
+  geom_vline(xintercept = 1, colour = "grey") +
+  geom_hline(yintercept = 1, colour = "grey") +
+  geom_point()+
+  coord_cartesian(xlim=c(0,2),ylim=c(0,1.5)) +
+  labs(x = "Skud 37/23°C (H/L) Ratio", 
+       y = "Wallace psup ratio 42/30°C", 
+       color = "", 
+       title = "Heavy/Light, unfiltered") +
+  theme_sk() +
+  theme(legend.position = c(0,0)) 
+
+fig.heavy.un <- ggplotly(unfilt_heavy, tooltip = c("label"))
+fig.heavy.un
+```
+
+Below is a plot for my commitee meeting.  
+
+```{r pretty-plot-unfiltered-pellet, fig.height = 7, fig.width = 9}
+repel <- y_unfilt%>% filter(Experiment == "pellet") %>%
+  mutate(labeling = case_when(agg == "aggregator" ~ gene, 
+                              agg =="superaggregator" ~ gene, 
+                              agg == "NA" ~ ""), 
+         quadrant = case_when((1/Ratio_HL_mean > 1 & psup_42C.8minover30C > 1) ~ 1, 
+                              (1/Ratio_HL_mean <= 1 & psup_42C.8minover30C > 1) ~ 2, 
+                              (1/Ratio_HL_mean <= 1 & psup_42C.8minover30C <= 1) ~ 3,
+                              (1/Ratio_HL_mean > 1 & psup_42C.8minover30C <= 1) ~ 4))
+
+agg.quads <- signif(table(filter(repel, agg != "")$quadrant)/45 *100, 3)
+
+
+ggplot(data = repel,
+       aes(x=1/Ratio_HL_mean,y=psup_42C.8minover30C,color=agg, 
+           label = gene, size = n_peptides))+
+  geom_vline(xintercept = 1, colour = "grey") +
+  geom_hline(yintercept = 1, colour = "grey") +
+  geom_point(alpha = 0.5)+
+  #coord_cartesian(xlim=c(0,2),ylim=c(0,1)) +
+  xlim(c(0,2)) +
+  ylim(c(0,1.5)) +
+  labs(x = "Skud 37/23°C Ratio", 
+       y = "Scer psup ratio 42/30°C", 
+       color = "stress behavior") +
+  geom_text_repel(aes(label = labeling), size = 3, max.overlaps = 10, show.legend = FALSE) +
+  annotate("text", label = paste0(c(as.character(agg.quads[[1]])), "%"), 
+           x = 1.95, y = 1.5, size = 6) +
+  annotate("text", label = paste0(c(as.character(agg.quads[[2]])), "%"), 
+           x = 0.07, y = 1.5, size = 6) +
+  annotate("text", label = paste0(c(as.character(agg.quads[[3]])), "%"), 
+           x = 0.07, y = 0.002, size = 6) +
+  annotate("text", label = paste0(c(as.character(agg.quads[[4]])), "%"), 
+           x = 1.95, y = 0.002, size = 6) +
+  scale_colour_manual(values = c("darkblue", "darkorange3", "grey")) +
+  #scale_size(name = "number of\npeptides\ndetected") +
+  scale_size(guide = "none") +
+  theme_sk() 
+
+#ggsave("C:/Users/Sammy/Dropbox (Drummond Lab)/sammy/Lab Meeting Presentation/11-18-21/mass-spec-skud-to-scer-v3.png", height = 7, width = 9)
+```
+
+
+## To Do List
+Correlation grid to see if the 30C data matches the 42C data better than the 46C data  
+
+Compare to Wallace data  
+also plot both vs 46C and 42C  
+also plot supernatant  
+
+need to look at supernatant for plotly??  
+Plotly - add titles and change NA values   
+switch sup/pellet axes in correlation plots  
+
+plot 46/30 ratio instead of 42/30 ratio for Wallace comparison plots
+
+Compare nuclear vs. cytosolic proteins detected, normalize to abdundance and number in each group
+In sup vs. pellet correlations, highlight aggregators/superaggregators still!  
+
+
+

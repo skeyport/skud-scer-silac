@@ -1,0 +1,80 @@
+---
+title: "Get protein seqs from AA from YGOB"
+author: "Sammy Keyport"
+date: "02/17/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE, fig.align = 'center')
+library(ggplot2)
+library(readr)
+library(tidyr)
+#library(lemon)
+library(dplyr)
+library(viridis)
+cbPalette <- c("#56B4E9","#CC79A7")
+cbPalette <- c("#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+library(extrafont)
+library(seqinr)
+library(stringr)
+#font_import()
+loadfonts(device = "win")
+theme_sk <- function(base_size=18) {
+  theme_grey(base_size=base_size, base_family = "") %+replace% 
+    theme(panel.grid=element_blank(),
+          axis.text = element_text(size = 15),
+          strip.text.x = element_text(size = 14, vjust = 2, margin = margin(t = 10)),
+          strip.text.y = element_text(size = 14, vjust = 2, margin = margin(r = 10)),
+          panel.background=element_blank(),
+          axis.ticks=element_line(colour="grey20"),
+          panel.border=element_rect(fill=NA),
+          legend.background = element_blank(),
+          #legend.key.height = unit(3, "mm"),
+          legend.key = element_blank(),
+          strip.background = element_blank(),
+          legend.box.spacing = unit(1, "mm"), 
+          plot.title = element_text(hjust = 0.5)) 
+}
+```
+
+**Purpose:** Get AAs from a specific species in YBOG. 
+
+## Load AA file and filter names
+
+```{r get msa data}
+allaa <- read.fasta(file = "../src/AA.fsa", whole.header = TRUE, seqtype = "AA")
+aas <- data.frame(Names=as.character(names(allaa)), Seqs=unlist(getSequence(allaa, as.string=T)))
+aas[] <- lapply(aas, as.character)
+skud <- aas %>%
+  dplyr::filter(str_detect(Names, "Skud")) %>%
+  separate(col = Names, into = c("ref.id", "ORF"), sep = "}") %>%
+  separate(col = ref.id, into = c("ref.id"), sep = " ", extra = "drop") %>%
+  separate(col = ORF, into = c("ORF", "Real"), sep = "\\(") %>%
+  separate(col = ORF, into = c("A", "ORF", "b"), sep = " ") %>%
+  separate(col = Real, into = c("Real"), sep = "\\)") %>%
+  select("ref.id", "ORF", "Real", "Seqs") %>%
+  unite(name, ref.id, ORF, Real, sep = "_", remove = FALSE) 
+```
+
+## Export new fasta file
+
+Next I want to export the sequences from `skud` and write them to a fasta file using the function `writeFasta()`. 
+
+```{r export traits and fasta}
+export.seqs <- skud %>%
+  select(name, Seqs)
+
+writeFasta<-function(data, filename){
+  fastaLines = c()
+  for (rowNum in 1:nrow(data)){
+    fastaLines = c(fastaLines, as.character(paste(">", data[rowNum,"name"], sep = "")))
+    fastaLines = c(fastaLines,as.character(data[rowNum,"Seqs"]))
+  }
+  fileConn<-file(filename)
+  writeLines(fastaLines, fileConn)
+  close(fileConn)
+}
+#writeFasta(export.seqs, "skud_proteome_ygob.fasta")
+#uncomment line 78 to re-export seqs
+```
