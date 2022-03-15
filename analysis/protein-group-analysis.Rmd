@@ -1,0 +1,69 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r setup,warning=FALSE,message=FALSE,echo=FALSE}
+
+## knitr options for report generation
+knitr::opts_chunk$set(warning=FALSE,message=FALSE,echo=FALSE,cache=TRUE,
+                      results="show",
+                      fig.path="figure/gene-expression-42C-",
+                      cache.path="cache/gene-expression-42C-")
+
+
+## data processing options, packages, functions
+options(stringsAsFactors=FALSE)  # load character strings as strings
+library(reshape2) # data manipulation
+library(tidyverse) # more data manipulation
+library(stringr)
+library(ggrepel)
+library(ggforce)
+
+library(cowplot) # extensions and nice defaults
+ # set default theme for graphics
+# theme_set(theme_bw() %+replace% theme(panel.grid.minor=element_blank())) 
+theme_set(theme_cowplot(font_size=11) %+replace% 
+              theme(# panel.grid.major=element_line(size=0.15,colour="grey50"),
+                  panel.border=element_rect(colour = "grey50",
+                                            linetype = "solid",size=0.5),
+                    strip.background = element_blank()))
+
+graycol <- "#333333cc"
+orangecol <- "#cc5500cc"
+bluecol <- "#0000aacc"
+greencol <- "#22cc00cc"
+purplecol <- "#cc22cccc"
+cyancol <- "#2aa198cc"
+redcol <- "#dc322fcc"
+violetcol <- "#6c71c4cc"
+
+```
+
+```{r read_utilities}
+source("./utilityFunctions.R")
+```
+
+```{r load_data}
+x <- read_tsv("../src/evidence/proteinGroups.txt", comment='#')
+gene.names <- read_tsv("../src/scerevisiae-orf-gene.txt", comment='#')
+d <- x[,c('Protein IDs','Intensity H supernatant','Intensity H pellet', 'Intensity L supernatant', 'Intensity L pellet')]
+colnames(d) <- c('protein.ID','hS','hP','lS','lP')
+
+ds <- d %>% subset(hS>0 & hP>0 & lS>0 & lP>0 & !grepl(';',protein.ID) & !grepl('CON__', protein.ID) & !grepl('REV__', protein.ID))
+ds <- ds %>% separate(protein.ID, into = c('Skud','region','scer_orf'), sep='_')
+ds <- ds %>% left_join(gene.names)
+
+up.subset <- ds %>% filter(lS+lP>10*(hS+hP))
+
+g <- ggplot(d, aes(x=hS+hP,y=lS+lP)) + geom_point() + scale_loglog() + geom_abline(slope=1) + geom_label_repel(data=up.subset, aes(label=gene))
+
+print(g)
+```
+
+
+
+
+
+
+
