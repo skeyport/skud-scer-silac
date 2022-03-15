@@ -123,8 +123,6 @@ skud_evi <- readEvidence("src/evidence/evidence.txt")
 raw_evi <- read_tsv("src/evidence/evidence.txt", guess_max = 17399)
 ```
 
-## PUT NEW EVIDENCE FILE IN SOURCE FOLDER
-
 ## View data
 
 I want to look at the density plots of each ratio to understand how abdunance may change across each media/temperature condition. This will allow us to evaluate any variation/human error in mixing ratios between the three conditions. Ideally the density curves will overlap.
@@ -179,43 +177,45 @@ ggplot(data = norm_skud_evi, aes(x = norm_value, color = ratio)) +
 
 ```
 
-
+Make S+P chart - treatment vs control
 
 ```{r}
-tidy_norm <- norm_skud_evi %>%
-  pivot_wider(names_from = Experiment, values_from = c(norm_value), values_fill = NA) %>%
-  unnest(cols = c(supernatant, pellet)) #%>%
-  filter(is.na(supernatant) == FALSE, is.na(pellet) == FALSE)
+# tidy_norm <- norm_skud_evi %>%
+#   filter(Experiment == "pellet") %>%
+#   rename(pellet_norm = norm_value) %>%
+#   select(-Experiment, -value) %>%
+#   merge(., filter(norm_skud_evi, Experiment == "supernatant"), by = "ratio") %>%
+#   rename(sup_norm = "norm_value") %>%
+#   select(-Experiment, -value)
 
 #ggplot(filter(norm_skud_evi, ratio = "")
 ```
 
-
+Put them in a list? Not paired values...
 
 Next up is too look for protein abundance changes. We can do this looking at the correlation of intensities of proteins detected across conditions. For example, since chaperones are thought to remain soluble during heat shock but also become transcriptionally and translationally induced, we can see if we see a deviation for intensity values in the heat shocked medias relative to the control media.  
 
 ```{r}
-# s_and_p <- raw_evi %>%
-#   pivot_wider(id_cols = c(Sequence, Proteins), names_from = Experiment, values_from = c("Intensity L" , "Intensity M", "Intensity H")) #%>%
-#   mutate(spL = sum(`Intensity L_pellet` + `Intensity L_supernatant`), 
-#          spM = sum(`Intensity M_pellet` + `Intensity M_supernatant`),
-#          spH = sum(`Intensity H_pellet` + `Intensity H_supernatant`))
-#   
-# s_and_p <- gene_evi %>%
+# s_and_p <- as.data.frame(gene_evi) %>%
+#   pivot_wider(id_cols = c(gene), names_from = Experiment, 
+#               values_from = c("Intensity L" , "Intensity M", "Intensity H")) %>%
+#   unchop(cols = c("Intensity L_pellet", "Intensity L_supernatant", "Intensity M_pellet", 
+#                   "Intensity M_supernatant", "Intensity H_pellet", "Intensity H_supernatant")) #%>%
+#   mutate(spL = sum(as.numeric(`Intensity L_pellet`) + as.numeric(`Intensity L_supernatant`)),
+#          spM = sum(as.numeric(`Intensity M_pellet`) + as.numeric(`Intensity M_supernatant`)),
+#          spH = sum(as.numeric(`Intensity H_pellet`) + as.numeric(`Intensity H_supernatant`))) 
+# 
+# s_and_p <- as.data.frame(gene_evi) %>%
 #   select(Experiment, skud_orf, scer_orf, gene, "Intensity L" , "Intensity M", "Intensity H") %>%
-#   pivot_wider(names_from = Experiment, 
+#   pivot_wider(names_from = Experiment,
 #               values_from = c("Intensity L" , "Intensity M", "Intensity H"), values_fill = NA) #%>%
 #   filter(is.na(supernatant) == FALSE, is.na(pellet) == FALSE)
-#   
-# test <- raw_evi %>%
-#   select(Experiment, `Intensity L` , `Intensity M`, `Intensity H`)
+# 
+# test <- unnest(s_and_p)
+ # select(Experiment, `Intensity L` , `Intensity M`, `Intensity H`)
 
 ```
 
-```{r}
-
-```
- 
 
 ```{r}
 induced <- read_tsv("src/hs_20min_induced.txt", comment = "#", col_names = FALSE) %>%
