@@ -47,18 +47,27 @@ source("../src/utilityFunctions.R")
 ```{r load_data}
 x <- read_tsv("../src/evidence/proteinGroups.txt", comment='#')
 gene.names <- read_tsv("../src/scerevisiae-orf-gene.txt", comment='#')
-d <- x[,c('Protein IDs','Intensity H supernatant','Intensity H pellet', 'Intensity L supernatant', 'Intensity L pellet')]
-colnames(d) <- c('protein.ID','hS','hP','lS','lP')
+d <- x[,c('Protein IDs','Intensity H supernatant','Intensity H pellet', 'Intensity L supernatant', 'Intensity L pellet',
+          'Intensity M supernatant', 'Intensity M pellet')]
+colnames(d) <- c('protein.ID','hS','hP','lS','lP','mS','mP')
+```
 
-ds <- d %>% subset(hS>0 & hP>0 & lS>0 & lP>0 & !grepl(';',protein.ID) & !grepl('CON__', protein.ID) & !grepl('REV__', protein.ID))
+```{r plotit, dependson='load_data', fig.asp=0.5, fig.width=5}
+
+ds <- d %>% subset(hS>0 & hP>0 & lS>0 & lP>0 & mS>0 & mP>0 & !grepl(';',protein.ID) & !grepl('CON__', protein.ID) & !grepl('REV__', protein.ID))
 ds <- ds %>% separate(protein.ID, into = c('Skud','region','scer_orf'), sep='_')
 ds <- ds %>% left_join(gene.names)
 
-up.subset <- ds %>% filter((lS+lP)>10*(hS+hP))
+threshold <- 2.5
+up.subset <- ds %>% filter((lS+lP)>threshold*(mS+mP))
+sol.subset <- ds %>% filter((lS/lP)>threshold*(mS/mP))
+#odds <- function(x){x/(1-x)}
 
-g <- ggplot(ds, aes(x=hS+hP,y=lS+lP)) + geom_point() + scale_loglog() + geom_abline(slope=1) + geom_label_repel(aes(label=gene))
+g <- ggplot(ds, aes(x=lS+lP, y=mS+mP)) + geom_point() + scale_loglog() + geom_abline(slope=1) + geom_label_repel(data=up.subset, aes(label=gene))
+g2 <- ggplot(ds, aes(x=lS/lP,y=mS/mP)) + geom_point() + scale_loglog() + geom_abline(slope=1) + geom_label_repel(data=sol.subset, aes(label=gene))
 
-print(g)
+pg <- plot_grid(g, g2, nrow=1)
+print(pg)
 ```
 
 
