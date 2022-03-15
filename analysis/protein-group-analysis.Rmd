@@ -41,7 +41,7 @@ violetcol <- "#6c71c4cc"
 ```
 
 ```{r read_utilities}
-source("./utilityFunctions.R")
+source("../src/utilityFunctions.R")
 ```
 
 ```{r load_data}
@@ -54,9 +54,9 @@ ds <- d %>% subset(hS>0 & hP>0 & lS>0 & lP>0 & !grepl(';',protein.ID) & !grepl('
 ds <- ds %>% separate(protein.ID, into = c('Skud','region','scer_orf'), sep='_')
 ds <- ds %>% left_join(gene.names)
 
-up.subset <- ds %>% filter(lS+lP>10*(hS+hP))
+up.subset <- ds %>% filter((lS+lP)>10*(hS+hP))
 
-g <- ggplot(d, aes(x=hS+hP,y=lS+lP)) + geom_point() + scale_loglog() + geom_abline(slope=1) + geom_label_repel(data=up.subset, aes(label=gene))
+g <- ggplot(ds, aes(x=hS+hP,y=lS+lP)) + geom_point() + scale_loglog() + geom_abline(slope=1) + geom_label_repel(aes(label=gene))
 
 print(g)
 ```
