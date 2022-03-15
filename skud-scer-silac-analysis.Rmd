@@ -1,4 +1,4 @@
----
+Evi---
 title: "Notebook for analyzing SILAC MS evidence file"
 author: "Sammy Keyport, from code by Jared Bard"
 date: "2021/03/23"
@@ -41,6 +41,7 @@ library(cat.extras)
 library(ggcorrplot)
 library(reshape2)
 library(ggpmisc)
+library(htmlwidgets)
 
 graycol <- "#333333cc"
 orangecol <- "#cc5500cc"
@@ -78,11 +79,11 @@ source("src/utilityFunctions.R")
 #function to load evidence file.
 #for peptides that are listed with multiple proteins: split the peptide up into separate entries for each peptide/protein pair
 readEvidence <- function(file = NULL) {
-  temp_evidence <- read_tsv(file) %>% 
+  temp_evidence <- read_tsv(file, guess_max = 17399) %>% 
     rename(Light = 'Intensity L', Medium = 'Intensity M', Heavy = 'Intensity H',
-           Ratio_ML = 'Ratio M/L', Ratio_HL = 'Ratio H/L', Ratio_HM = 'Ratio H/M') %>%
-    separate(Proteins,paste("Protein_",0:9),sep=";") %>% 
-    gather(key = "Protein_num",value = "ORF",paste("Protein_",0:9)) %>%
+            Ratio_ML = 'Ratio M/L', Ratio_HL = 'Ratio H/L', Ratio_HM = 'Ratio H/M') %>%
+    separate(Proteins, paste("Protein_",0:25),sep=";") %>% 
+    gather(key = "Protein_num",value = "ORF",paste("Protein_",0:25)) %>%
     select(-Protein_num) %>% 
     filter(ORF != 'NA')
 #add an "Experiment" column if the data doesn't already have one  
@@ -92,15 +93,21 @@ if ('Experiment' %!in% names(temp_evidence)) {
 #Group peptides together into protein bins and calculate the mean SILAC ratio of each peptide
 #Also filters for p values <-0.05 and selects peptides with a ratio listed for each silac pair
 #add in labels to the table
-  temp_proteins <- temp_evidence %>% 
-    filter(PEP < 0.05, Ratio_ML > 0, Ratio_HL > 0, Ratio_HM > 0) %>% 
+  temp_proteins <- temp_evidence %>%
+    filter(PEP < 0.05, Ratio_ML > 0, Ratio_HL > 0, Ratio_HM > 0) %>%
     group_by(Experiment,ORF) %>%
-    summarise(Ratio_ML_mean = mean(Ratio_ML), Ratio_HL_mean = mean(Ratio_HL), 
-              Ratio_HM_mean = mean(Ratio_HM), L_total = sum(Light), M_total = sum(Medium), 
-              H_total = sum(Heavy),n_peptides = n()) %>%
+    summarise(Ratio_ML_mean = mean(Ratio_ML), Ratio_HL_mean = mean(Ratio_HL),
+              Ratio_HM_mean = mean(Ratio_HM), L_total = sum(Light), M_total = sum(Medium),
+              H_total = sum(Heavy),n_peptides = n(), 
+              Ratio_ML_med = median(Ratio_ML), Ratio_HL_med = median(Ratio_HL),
+              Ratio_HM_med = median(Ratio_HM)) %>%
     ungroup()
   return(temp_proteins)
 }
+
+###### add medians too
+
+file <- "D:/20220308MS/combined/txt/evidence.txt"
 ```
 
 ## Load data
@@ -112,8 +119,194 @@ Here we are loading two datasets: psup data from Wallace et al., *Cell* 2015 pap
 ```{r read-files, dependson="setup"}
 psup <- read_tsv("src/scer_aggregation_psup_long.txt",comment = "#") %>% rename(ORF = orf)
 skud_evi <- readEvidence("src/evidence/evidence.txt")
+
+raw_evi <- read_tsv("src/evidence/evidence.txt", guess_max = 17399)
 ```
 
+## PUT NEW EVIDENCE FILE IN SOURCE FOLDER
+
+## View data
+
+I want to look at the density plots of each ratio to understand how abdunance may change across each media/temperature condition. This will allow us to evaluate any variation/human error in mixing ratios between the three conditions. Ideally the density curves will overlap.
+
+```{r view ratios}
+tidy_raw <- raw_evi %>%
+  select(`Ratio H/L`, `Ratio M/L`, `Ratio H/M`) %>%
+  pivot_longer(cols = c(`Ratio H/L`, `Ratio M/L`, `Ratio H/M`)) %>%
+  rename("ratio" = "name")
+
+meds <- tidy_raw %>%
+  group_by(ratio) %>%
+  summarise(med = median(value, na.rm = TRUE), 
+            count = sum(!is.na(value)))
+
+ggplot(data = tidy_raw, aes(x = value, color = ratio)) +
+  geom_density(size = 2, alpha = alph) +
+  scale_x_log10nice() +
+  theme_sk() +
+  labs(x = "value", 
+       y = "density") +
+  scale_color_manual(values = c(graycol, bluecol, orangecol)) +
+  annotate(geom = "text", x = 0.03, y = 5.85, 
+           label = paste("medians"), size = 5) +
+  annotate(geom = "text", x = 0.03, y = 5.4, 
+           label = paste("H/L =", meds[1,2]), size = 5) +
+  annotate(geom = "text", x = 0.03, y = 4.95, 
+           label = paste("H/M = ", meds[2,2]), size = 5) +
+  annotate(geom = "text", x = 0.03, y = 4.45, 
+           label = paste("M/L = ", meds[3,2]), size = 5)
+```
+
+
+This looks mostly OK -- H/L ratio lower that the rest, but this can be accounted for in subsequent normalization steps. To normalize, I'll divide each value by the median of each ratio.
+
+```{r}
+norm_skud_evi <- skud_evi %>%
+  select(Ratio_HL_med, Ratio_ML_med, Ratio_HM_med, Experiment) %>%
+  pivot_longer(cols = c(Ratio_HL_med, Ratio_ML_med, Ratio_HM_med)) %>%
+  rename("ratio" = "name") %>%
+  mutate(norm_value = case_when(ratio == "Ratio_HL_med" ~ value/as.numeric(meds[1,2]), 
+                                ratio == "Ratio_ML_med" ~ value/as.numeric(meds[3,2]), 
+                                ratio == "Ratio_HM_med" ~ value/as.numeric(meds[2,2])))
+
+ggplot(data = norm_skud_evi, aes(x = norm_value, color = ratio)) +
+  geom_density(size = 2, alpha = alph) +
+  scale_x_log10nice() +
+  theme_sk() +
+  labs(x = "normalized value", 
+       y = "density") +
+  scale_color_manual(values = c(graycol, bluecol, orangecol)) 
+
+```
+
+
+
+```{r}
+tidy_norm <- norm_skud_evi %>%
+  pivot_wider(names_from = Experiment, values_from = c(norm_value), values_fill = NA) %>%
+  unnest(cols = c(supernatant, pellet)) #%>%
+  filter(is.na(supernatant) == FALSE, is.na(pellet) == FALSE)
+
+#ggplot(filter(norm_skud_evi, ratio = "")
+```
+
+
+
+Next up is too look for protein abundance changes. We can do this looking at the correlation of intensities of proteins detected across conditions. For example, since chaperones are thought to remain soluble during heat shock but also become transcriptionally and translationally induced, we can see if we see a deviation for intensity values in the heat shocked medias relative to the control media.  
+
+```{r}
+# s_and_p <- raw_evi %>%
+#   pivot_wider(id_cols = c(Sequence, Proteins), names_from = Experiment, values_from = c("Intensity L" , "Intensity M", "Intensity H")) #%>%
+#   mutate(spL = sum(`Intensity L_pellet` + `Intensity L_supernatant`), 
+#          spM = sum(`Intensity M_pellet` + `Intensity M_supernatant`),
+#          spH = sum(`Intensity H_pellet` + `Intensity H_supernatant`))
+#   
+# s_and_p <- gene_evi %>%
+#   select(Experiment, skud_orf, scer_orf, gene, "Intensity L" , "Intensity M", "Intensity H") %>%
+#   pivot_wider(names_from = Experiment, 
+#               values_from = c("Intensity L" , "Intensity M", "Intensity H"), values_fill = NA) #%>%
+#   filter(is.na(supernatant) == FALSE, is.na(pellet) == FALSE)
+#   
+# test <- raw_evi %>%
+#   select(Experiment, `Intensity L` , `Intensity M`, `Intensity H`)
+
+```
+
+```{r}
+
+```
+ 
+
+```{r}
+induced <- read_tsv("src/hs_20min_induced.txt", comment = "#", col_names = FALSE) %>%
+  mutate(change = rep("induced", length(X1)))
+repressed <- read_tsv("src/hs_20min_repressed.txt", comment = "#", col_names = FALSE) %>%
+  mutate(change = rep("repressed", length(X1)))
+change <- rbind(induced, repressed) %>%
+  rename("scer_orf" = "X1")
+
+gene_evi <- raw_evi %>%
+  separate(Proteins, paste("Protein_",0:25),sep=";") %>% 
+  gather(key = "Protein_num",value = "ORF",paste("Protein_",0:25)) %>%
+  select(-Protein_num) %>% 
+  filter(ORF != 'NA') %>%
+  filter(!grepl("CON_*",ORF)) %>%
+  separate(ORF, into = c("Skud", "region", "scer_orf"), sep = "_") %>%
+  unite(skud_orf, c(Skud, region), sep = "_") %>%
+  left_join(., read_tsv("src/scerevisiae-orf-gene.txt")) %>%
+  left_join(., change)
+  
+Hsup <- ggplot(filter(gene_evi, `Experiment` == "supernatant"), 
+       aes(x = `Intensity L`, y = `Intensity H`, label = gene, color = change)) +
+  geom_point(alpha = alph) +
+  scale_loglog() +
+  geom_abline(slope = 1) +
+  theme_sk() +
+  theme(legend.position = "none") +
+  labs(x = "", y = "Intensity H\n(10<sup>y</sup>)")
+
+Msup <- ggplot(filter(gene_evi, `Experiment` == "supernatant"), 
+       aes(x = `Intensity L`, y = `Intensity M`, label = gene, color = change)) +
+  geom_point(alpha = alph) +
+  scale_loglog() +
+  geom_abline(slope = 1) +
+  theme_sk() +
+  theme(legend.position = "none") +
+  labs(x = "", y = "Intensity M\n(10<sup>y</sup>)")
+
+Hpel <- ggplot(filter(gene_evi, `Experiment` == "pellet"), 
+       aes(x = `Intensity L`, y = `Intensity H`, label = gene, color = change)) +
+  geom_point(alpha = alph) +
+  scale_loglog() +
+  geom_abline(slope = 1) +
+  theme_sk() +
+  theme(legend.position = "none") +
+  labs(x = "", y = "Intensity H\n(10<sup>y</sup>)")
+
+Mpel <- ggplot(filter(gene_evi, `Experiment` == "pellet"), 
+       aes(x = `Intensity L`, y = `Intensity M`, label = gene, color = change)) +
+  geom_point(alpha = alph) +
+  scale_loglog() + 
+  geom_abline(slope = 1) +
+  theme_sk()  +
+  theme(legend.position = "none") +
+  labs(x = "", y = "Intensity M\n(10<sup>y</sup>)")
+
+annotations = list( 
+  list(x = 0.25,  
+    y = 1.0,  
+    text = "Supernatant",  
+    xref = "paper",  
+    yref = "paper",
+    xanchor = "center",  
+    yanchor = "bottom",  
+    showarrow = FALSE),  
+  list(x = 0.75,  
+    y = 1,  
+    text = "Pellet",  
+    xref = "paper",  
+    yref = "paper",  
+    xanchor = "center",  
+    yanchor = "bottom",  
+    showarrow = FALSE),  
+  list(x = 0.5,  
+    y = -0.18,  
+    text = "Intensity L (10<sup>x</sup>)",  
+    xref = "paper",  
+    yref = "paper",  
+    xanchor = "center",  
+    yanchor = "bottom",  
+    showarrow = FALSE))
+
+x <- subplot(Hsup, Hpel, Msup, Mpel, nrows = 2, 
+             shareX = TRUE, shareY = TRUE) %>%
+  layout(annotations = annotations)
+x
+#saveWidget(x, "plotly_intensity_corr.html")
+```
+
+
+These data seem to fall about the y = x line, with the medium intensities (30C) falling more tightly than the heavy intensities (37C). Some stats can probably be done here to clarify, but yeah. Looks ok, with no clear pattern of protein changes among repressed and induced genes after 20 min between the fractions.
 
 ## Filter data
 
@@ -125,13 +318,12 @@ I also am filtering the psup data from Wallace et al., *Cell* 2015 paper to comp
 ```{r filter-data}
 # filter proteins with > 1 peptides (reduces noise)
 data_filt <- skud_evi %>% filter(n_peptides>1, !grepl("CON_*",ORF)) %>%
-  separate(col = ORF, into = c("species", "region", "ORF", "real"), sep = "_") %>%
-  select(-species, -region)
+  separate(col = ORF, into = c("skud", "region", "ORF"), sep = "_") %>%
+  select(-skud)
 
 data_unfilt <- skud_evi %>% filter(!grepl("CON_*",ORF)) %>%
-  separate(col = ORF, into = c("species", "region", "ORF", "real"), sep = "_", remove = FALSE) %>%
-  select(-species, -region)
-
+  separate(col = ORF, into = c("skud", "region", "ORF"), sep = "_") %>%
+  select(-skud)
 # In my data, untreated cells (L) were mixed with heat shocked cells (M and H). Thus the ratio of M/L or H/L should correspond to the ratio of psup_42C/psup_30C or psup_46C/psup_30C, respectively. 
 
 psup_ratio <- psup %>% filter(experiment %in% c("30C.rep1","37C.8min", "42C.8min", "46C.8min")) %>%
@@ -156,11 +348,15 @@ drummond_heat_agg <- read_tsv("src/drummond_heat_aggregators.txt",
 
 y_filt <- data_filt %>%
   left_join(psup_ratio %>% select(ORF,gene, psup_42C.8minover30C, psup_37C.8minover30C, psup_46C.8minover30C) ,by=c("ORF")) %>%
-  left_join(drummond_heat_agg,by="ORF")
+  left_join(drummond_heat_agg,by="ORF") %>%
+  mutate("skudORF" = paste0("Skud_", region)) %>%
+  select(-region)
 
 y_unfilt <- data_unfilt %>%
   left_join(psup_ratio %>% select(ORF,gene, psup_42C.8minover30C, psup_37C.8minover30C, psup_46C.8minover30C),by=c("ORF")) %>%
-  left_join(drummond_heat_agg,by="ORF")
+  left_join(drummond_heat_agg,by="ORF") %>%
+  mutate("skudORF" = paste0("Skud_", region)) %>%
+  select(-region)
 
 ```
 
@@ -178,24 +374,22 @@ I will calculate Spearman's `r knitr::asis_output("\U03c1")` pairwise correlatio
 ```{r calculate-spearmans-rho-filtered}
 #medium
 y_filt_med <- distinct(y_filt) %>%
-  select(Experiment, ORF, gene, Ratio_ML_mean, real)%>%
+  select(Experiment, ORF, gene, Ratio_ML_mean, skudORF)%>%
   pivot_wider(names_from = Experiment, 
               values_from = Ratio_ML_mean, values_fill = NA) %>%
-  unnest(cols = c(pellet, supernatant)) %>%
   filter(is.na(supernatant) == FALSE, is.na(pellet) == FALSE)
 cor.med <- cor(y_filt_med$supernatant, y_filt_med$pellet, method='s', use='pairwise.complete.obs')
 #heavy
 y_filt_heavy <- distinct(y_filt) %>%
-  select(Experiment, ORF, gene, Ratio_HL_mean, real) %>%
+  select(Experiment, ORF, gene, Ratio_HL_mean, skudORF) %>%
   pivot_wider(names_from = Experiment, 
               values_from = Ratio_HL_mean, values_fill = NA) %>%
-  unnest(cols = c(pellet, supernatant)) %>%
   filter(is.na(supernatant) == FALSE, is.na(pellet) == FALSE)
 cor.heavy <- cor(y_filt_heavy$pellet, y_filt_heavy$supernatant, method='s', use = "pairwise.complete.obs")
 
 ```
 
-Now plotting the data in **both** fractions of the filtered data (824 -> 195, ~24%)...  
+Now plotting the data in **both** fractions of the filtered data (824 -> 204, ~25%)...  
 
 
 ```{r fig.show="hold", out.width="50%", fig.align="default"}
@@ -221,33 +415,25 @@ ggplot(y_filt_heavy, aes(x=supernatant, y=pellet)) +
 ```
 Note different x axis range.  
 
-I am down to 195 proteins detected in **both** fractions. This leads to a positve rho in both cases, which is not what I expected. However, the ML temperature comparison (30/23°C) is the less intense temperature difference, and in HL (37/23°C) we can see the rho is closer to zero. Let's look using unfiltered data (more proteins in both fractions).  
+I am down to 204 proteins detected in **both** fractions. This leads to a positve rho in both cases, which is not what I expected. However, the ML temperature comparison (30/23°C) is the less intense temperature difference, and in HL (37/23°C) we can see the rho is closer to zero. Let's look using unfiltered data (more proteins in both fractions).  
 
 #### Unfiltered data
 
 ```{r calculate-spearmans-rho-unfiltered}
 #heavy, unfiltered
 y_unfilt_heavy <- y_unfilt %>%
-  select(Experiment, ORF, gene, Ratio_HL_mean, real) %>%
+  select(Experiment, ORF, gene, Ratio_HL_mean, skudORF) %>%
   pivot_wider(names_from = Experiment, 
               values_from = Ratio_HL_mean, values_fill = NA) %>%
-  pivot_longer(c(pellet, supernatant)) %>%
-  mutate(value = lapply(value, `length<-`, max(lengths(value)))) %>% 
-  pivot_wider(names_from = name, values_from = c(value)) %>% 
-  unchop(cols = c(pellet, supernatant)) %>%
   filter(is.na(supernatant) == FALSE, is.na(pellet) == FALSE)
 
 cor.un.heavy <- cor(y_unfilt_heavy$supernatant, y_unfilt_heavy$pellet, method='s', use='pairwise.complete.obs')
 
 #medium, unfiltered
 y_unfilt_med <- y_unfilt %>%
-  select(Experiment, ORF, gene, Ratio_ML_mean, real) %>%
+  select(Experiment, ORF, gene, Ratio_ML_mean, skudORF) %>%
   pivot_wider(names_from = Experiment, 
               values_from = Ratio_ML_mean, values_fill = NA) %>%
-  pivot_longer(c(pellet, supernatant)) %>%
-  mutate(value = lapply(value, `length<-`, max(lengths(value)))) %>% 
-  pivot_wider(names_from = name, values_from = c(value)) %>% 
-  unchop(cols = c(pellet, supernatant)) %>%
   filter(is.na(supernatant) == FALSE, is.na(pellet) == FALSE)
 
 cor.un.med <- cor(y_unfilt_med$supernatant, y_unfilt_med$pellet, method='s', use='pairwise.complete.obs')

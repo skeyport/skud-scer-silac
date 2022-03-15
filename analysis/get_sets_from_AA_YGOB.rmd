@@ -42,6 +42,14 @@ theme_sk <- function(base_size=18) {
 
 ## Load AA file and filter names
 
+```{r}
+pillars <- read_tsv("../analysis/Pillars.txt", col_names = FALSE) %>%
+  select(X10, X12) %>%
+  rename("ref.id" = "X10", "scer_orf" = "X12") %>%
+  subset(ref.id != "---" & scer_orf != "---") 
+```
+
+
 ```{r get msa data}
 allaa <- read.fasta(file = "../src/AA.fsa", whole.header = TRUE, seqtype = "AA")
 aas <- data.frame(Names=as.character(names(allaa)), Seqs=unlist(getSequence(allaa, as.string=T)))
@@ -50,11 +58,9 @@ skud <- aas %>%
   dplyr::filter(str_detect(Names, "Skud")) %>%
   separate(col = Names, into = c("ref.id", "ORF"), sep = "}") %>%
   separate(col = ref.id, into = c("ref.id"), sep = " ", extra = "drop") %>%
-  separate(col = ORF, into = c("ORF", "Real"), sep = "\\(") %>%
-  separate(col = ORF, into = c("A", "ORF", "b"), sep = " ") %>%
-  separate(col = Real, into = c("Real"), sep = "\\)") %>%
-  select("ref.id", "ORF", "Real", "Seqs") %>%
-  unite(name, ref.id, ORF, Real, sep = "_", remove = FALSE) 
+  left_join(., pillars, by =  "ref.id") %>%
+  select(ref.id, scer_orf, Seqs) %>%
+  unite(name, ref.id, scer_orf, sep = "_", remove = FALSE) 
 ```
 
 ## Export new fasta file
@@ -75,6 +81,6 @@ writeFasta<-function(data, filename){
   writeLines(fastaLines, fileConn)
   close(fileConn)
 }
-#writeFasta(export.seqs, "skud_proteome_ygob.fasta")
+writeFasta(export.seqs, "skud_proteome_ygob.fasta")
 #uncomment line 78 to re-export seqs
 ```
